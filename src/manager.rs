@@ -1,6 +1,6 @@
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex, MutexGuard},
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use solana_client::rpc_client::RpcClient;
 use solana_program::example_mocks::solana_sdk::system_program;
 use solana_sdk::{
-    account::Account, clock::Clock, epoch_schedule::EpochSchedule, pubkey::Pubkey,
+    account::Account, clock::Clock, pubkey::Pubkey,
     slot_hashes::SlotHashes, transaction::VersionedTransaction,
 };
 use spl_token::solana_program::program_pack::Pack;
@@ -26,15 +26,19 @@ use uuid::Uuid;
 
 const DEFAULT_RPC_CLIENT: &str = "https://api.mainnet-beta.solana.com";
 
+/// A Fork of mainnet Solana network
 pub struct Fork {
-    id: Uuid,
-    // Expires 15 minutes after creation
-    expires_at: Instant,
+    /// Solana virtual machine/runtime
     pub svm: Arc<Mutex<LiteSVM>>,
+    /// A List of all executed transactions in this fork
     pub executed_transactions: Mutex<Vec<TransactionRecord>>,
+    /// A List of all simulated transactions in this fork
     pub simulated_transactions: Mutex<Vec<TransactionRecord>>,
+    /// Fork expires 15 minutes after creation
+    expires_at: Instant,
 }
 
+/// A record of transaction executed/simulated on the fork
 #[derive(Deserialize, Serialize, Clone)]
 pub struct TransactionRecord {
     pub txn: TransactionMetadata,
@@ -43,9 +47,8 @@ pub struct TransactionRecord {
 }
 
 impl Fork {
-    pub fn new(id: Uuid, svm: Arc<Mutex<LiteSVM>>) -> Self {
+    pub fn new(svm: Arc<Mutex<LiteSVM>>) -> Self {
         Fork {
-            id,
             expires_at: Instant::now() + Duration::from_secs(15 * 60),
             svm,
             executed_transactions: Mutex::new(Vec::new()),
@@ -54,6 +57,7 @@ impl Fork {
     }
 }
 
+/// Manager for managing forks
 #[derive(Clone)]
 pub struct ForkManager {
     pub forks: HashMap<Uuid, Arc<Fork>>,
@@ -66,27 +70,17 @@ impl ForkManager {
         }
     }
 
+    /// Creates a new fork with random fork id
     pub fn create_fork(&mut self) -> anyhow::Result<Uuid> {
-        let client = RpcClient::new(DEFAULT_RPC_CLIENT.to_string());
-        let latest_blockhash = client.get_latest_blockhash()?;
-        let slot = client.get_slot()?;
-
         let mut svm = LiteSVM::new().with_sysvars().with_blockhash_check(false);
 
-        let mut hash = svm.get_sysvar::<SlotHashes>().clone();
-        hash.push((slot, latest_blockhash));
-        svm.set_sysvar(&SlotHashes::new(&hash));
-
-        let mut clock: Clock = svm.get_sysvar();
-        clock.slot = slot;
-        clock.unix_timestamp = chrono::Utc::now().timestamp();
-        svm.set_sysvar(&clock);
-
-        let epoch_schedule: EpochSchedule = client.get_epoch_schedule()?;
-        svm.set_sysvar(&epoch_schedule);
+        match update_sysvars(&mut svm) {
+            Ok(_) => println!("updated sysvars"),
+            Err(e) => println!("error in updating sysvars: {:?}", e),
+        }
 
         let fork_id = Uuid::new_v4();
-        let fork = Fork::new(fork_id, Arc::new(Mutex::new(svm)));
+        let fork = Fork::new(Arc::new(Mutex::new(svm)));
 
         self.forks.insert(fork_id, Arc::new(fork));
 
@@ -101,6 +95,7 @@ impl ForkManager {
         self.forks.remove(id).is_some()
     }
 
+    /// Function which should run in the background to clean up expired forks
     pub fn cleanup_expired(&mut self) {
         let now = Instant::now();
         let expired: Vec<Uuid> = self
@@ -116,6 +111,7 @@ impl ForkManager {
         }
     }
 
+    /// Executes a transaction on a fork
     pub fn execute_transaction(
         &self,
         fork_id: &Uuid,
@@ -150,6 +146,7 @@ impl ForkManager {
         }
     }
 
+    /// Simulates a transaction on a fork
     pub fn simulate_transaction(
         &self,
         fork_id: &Uuid,
@@ -184,6 +181,8 @@ impl ForkManager {
         }
     }
 
+    /// Helper function which loads on-demand accounts from the mainnet
+    /// which are not present locally on the fork
     fn preload_missing_accounts(&self, svm: &mut LiteSVM, tx: &VersionedTransaction) {
         let client = RpcClient::new(DEFAULT_RPC_CLIENT.to_string());
         let account_keys = tx.message.static_account_keys();
@@ -200,6 +199,7 @@ impl ForkManager {
         }
     }
 
+    /// Sets lamports of an address
     pub fn set_lamports(
         &self,
         fork_id: &Uuid,
@@ -220,6 +220,7 @@ impl ForkManager {
         }
     }
 
+    /// Sets tokens of an address for a token
     pub fn set_token_balance(
         &self,
         fork_id: &Uuid,
@@ -283,6 +284,7 @@ impl ForkManager {
         }
     }
 
+    /// Gets all executed transactions on a fork
     pub fn get_executed_transactions(
         &self,
         fork_id: &Uuid,
@@ -299,6 +301,7 @@ impl ForkManager {
         }
     }
 
+    /// Gets all simulated transactions on a fork
     pub fn get_simulated_transactions(
         &self,
         fork_id: &Uuid,
@@ -316,11 +319,12 @@ impl ForkManager {
     }
 }
 
-// Assuming Write lock
-pub fn update_sysvars(svm: &mut MutexGuard<'_, LiteSVM>) -> anyhow::Result<()> {
+/// Helper function to update the variables of a fork
+pub fn update_sysvars(svm: &mut LiteSVM) -> anyhow::Result<()> {
     let client = RpcClient::new(DEFAULT_RPC_CLIENT.to_string());
     let latest_blockhash = client.get_latest_blockhash()?;
     let slot = client.get_slot()?;
+    let epochs = client.get_epoch_schedule()?;
 
     let mut slot_hashes = svm.get_sysvar::<SlotHashes>().clone();
     if !slot_hashes.iter().any(|(_, h)| *h == latest_blockhash) {
@@ -332,6 +336,7 @@ pub fn update_sysvars(svm: &mut MutexGuard<'_, LiteSVM>) -> anyhow::Result<()> {
     clock.slot = slot;
     clock.unix_timestamp = Utc::now().timestamp();
     svm.set_sysvar(&clock);
+    svm.set_sysvar(&epochs);
 
     Ok(())
 }

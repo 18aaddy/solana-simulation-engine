@@ -10,7 +10,9 @@ use serde::{Deserialize, Serialize};
 use std::{
     net::SocketAddr,
     sync::{Arc, Mutex},
+    time::Duration,
 };
+use tokio::time;
 use uuid::Uuid;
 mod manager;
 use manager::ForkManager;
@@ -56,6 +58,18 @@ async fn main() {
     tracing_subscriber::fmt::init();
     let manager = Arc::new(Mutex::new(ForkManager::new()));
 
+    // clean up forks every if older than 15 minutes
+    let cleanup_manager = Arc::clone(&manager);
+    tokio::spawn(async move {
+        let mut interval = time::interval(Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+            if let Ok(mut mgr) = cleanup_manager.lock() {
+                mgr.cleanup_expired();
+            }
+        }
+    });
+
     let app = Router::new()
         .route("/forks", post(create_fork))
         .route("/forks/{id}", delete(delete_fork))
@@ -76,6 +90,7 @@ async fn main() {
 
     let addr = SocketAddr::from(([127, 0, 0, 1], 8080));
     println!("server running at {}", addr);
+    println!("Cleanup task started - will run every 60 seconds");
     axum::serve(tokio::net::TcpListener::bind(addr).await.unwrap(), app)
         .await
         .unwrap();
