@@ -1,0 +1,30 @@
+{
+    "name": "solana-simulation-engine-tests",
+    "version": "1.0.0",
+    "description": "API tests for Solana Simulation Engine",
+    "main": "api_test.js",
+    "scripts": {
+        "test": "node api_test.js",
+        "test:real": "node test_simulation_engine.js",
+        "test:watch": "nodemon api_test.js"
+    },
+    "dependencies": {
+        "@solana/web3.js": "^1.95.0",
+        "node-fetch": "^3.3.2"
+    },
+    "devDependencies": {
+        "nodemon": "^3.0.1"
+    },
+    "engines": {
+        "node": ">=18.0.0"
+    },
+    "keywords": [
+        "solana",
+        "blockchain",
+        "api",
+        "testing",
+        "simulation"
+    ],
+    "author": "",
+    "license": "MIT"
+}

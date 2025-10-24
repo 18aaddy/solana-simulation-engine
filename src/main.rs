@@ -14,8 +14,11 @@ use std::{
 use uuid::Uuid;
 mod manager;
 use manager::ForkManager;
+use solana_sdk::{account::Account, pubkey::Pubkey};
 
 use solana_sdk::transaction::VersionedTransaction;
+
+use crate::manager::TransactionRecord;
 
 #[derive(Deserialize)]
 struct ExecuteRequest {
@@ -26,6 +29,11 @@ struct ExecuteRequest {
 struct SetLamportsRequest {
     pubkey: String,
     lamports: u64,
+}
+
+#[derive(Deserialize)]
+struct GetAccountRequest {
+    pubkey: String,
 }
 
 #[derive(Deserialize)]
@@ -55,6 +63,15 @@ async fn main() {
         .route("/forks/{id}/simulate", post(simulate_transaction))
         .route("/forks/{id}/set_lamports", post(set_lamports))
         .route("/forks/{id}/set_token_balance", post(set_token_balance))
+        .route("/forks/{id}/get_account", post(get_account))
+        .route(
+            "/forks/{id}/get_executed_transactions",
+            post(get_executed_transactions),
+        )
+        .route(
+            "/forks/{id}/get_simulated_transactions",
+            post(get_simulated_transactions),
+        )
         .with_state(manager);
 
     let addr = SocketAddr::from(([127, 0, 0, 1], 8080));
@@ -156,7 +173,6 @@ async fn set_lamports(
     Path(fork_id): Path<Uuid>,
     Json(req): Json<SetLamportsRequest>,
 ) -> Json<ApiResponse<String>> {
-    use solana_sdk::pubkey::Pubkey;
     let pubkey = req.pubkey.parse::<Pubkey>().unwrap();
 
     match manager
@@ -172,7 +188,7 @@ async fn set_lamports(
         Err(e) => Json(ApiResponse {
             success: false,
             data: None,
-            error: Some(format!("{:?}", e)),
+            error: Some(format!("{:?}", e.to_string())),
         }),
     }
 }
@@ -183,7 +199,6 @@ async fn set_token_balance(
     Path(fork_id): Path<Uuid>,
     Json(req): Json<SetTokenBalanceRequest>,
 ) -> Json<ApiResponse<String>> {
-    use solana_sdk::pubkey::Pubkey;
     let token_account = req.token_account.parse::<Pubkey>().unwrap();
     let mint = req.mint.parse::<Pubkey>().unwrap();
     let owner = req.owner.parse::<Pubkey>().unwrap();
@@ -204,6 +219,65 @@ async fn set_token_balance(
             success: false,
             data: None,
             error: Some(format!("{:?}", e)),
+        }),
+    }
+}
+
+#[axum::debug_handler]
+async fn get_account(
+    State(manager): State<Arc<Mutex<ForkManager>>>,
+    Path(fork_id): Path<Uuid>,
+    Json(req): Json<GetAccountRequest>,
+) -> Json<ApiResponse<Account>> {
+    let pubkey = req.pubkey.parse::<Pubkey>().unwrap();
+    match manager.lock().unwrap().get_account(&fork_id, pubkey) {
+        Ok(result) => Json(ApiResponse {
+            success: true,
+            data: Some(result),
+            error: None,
+        }),
+        Err(e) => Json(ApiResponse {
+            success: false,
+            data: None,
+            error: Some(format!("{:?}", e)),
+        }),
+    }
+}
+
+#[axum::debug_handler]
+async fn get_executed_transactions(
+    State(manager): State<Arc<Mutex<ForkManager>>>,
+    Path(fork_id): Path<Uuid>,
+) -> Json<ApiResponse<Vec<TransactionRecord>>> {
+    match manager.lock().unwrap().get_executed_transactions(&fork_id) {
+        Ok(txns) => Json(ApiResponse {
+            success: true,
+            data: Some(txns),
+            error: None,
+        }),
+        Err(e) => Json(ApiResponse {
+            success: false,
+            data: None,
+            error: Some(e.to_string()),
+        }),
+    }
+}
+
+#[axum::debug_handler]
+async fn get_simulated_transactions(
+    State(manager): State<Arc<Mutex<ForkManager>>>,
+    Path(fork_id): Path<Uuid>,
+) -> Json<ApiResponse<Vec<TransactionRecord>>> {
+    match manager.lock().unwrap().get_simulated_transactions(&fork_id) {
+        Ok(txns) => Json(ApiResponse {
+            success: true,
+            data: Some(txns),
+            error: None,
+        }),
+        Err(e) => Json(ApiResponse {
+            success: false,
+            data: None,
+            error: Some(e.to_string()),
         }),
     }
 }

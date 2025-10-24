@@ -1,19 +1,19 @@
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, MutexGuard},
     time::{Duration, Instant},
 };
 
+use chrono::{Local, Utc};
 use litesvm::{
     LiteSVM,
-    types::{
-        FailedTransactionMetadata, SimulatedTransactionInfo, TransactionMetadata,
-    },
+    types::{SimulatedTransactionInfo, TransactionMetadata},
 };
+use serde::{Deserialize, Serialize};
 use solana_client::rpc_client::RpcClient;
 use solana_program::example_mocks::solana_sdk::system_program;
 use solana_sdk::{
-    account::Account, clock::Clock, program_error::ProgramError, pubkey::Pubkey,
+    account::Account, clock::Clock, epoch_schedule::EpochSchedule, pubkey::Pubkey,
     slot_hashes::SlotHashes, transaction::VersionedTransaction,
 };
 use spl_token::solana_program::program_pack::Pack;
@@ -27,10 +27,19 @@ use uuid::Uuid;
 const DEFAULT_RPC_CLIENT: &str = "https://api.mainnet-beta.solana.com";
 
 pub struct Fork {
-    pub id: Uuid,
+    id: Uuid,
     // Expires 15 minutes after creation
-    pub expires_at: Instant,
+    expires_at: Instant,
     pub svm: Arc<Mutex<LiteSVM>>,
+    pub executed_transactions: Mutex<Vec<TransactionRecord>>,
+    pub simulated_transactions: Mutex<Vec<TransactionRecord>>,
+}
+
+#[derive(Deserialize, Serialize, Clone)]
+pub struct TransactionRecord {
+    pub txn: TransactionMetadata,
+    pub time: String,
+    pub success: bool,
 }
 
 impl Fork {
@@ -39,6 +48,8 @@ impl Fork {
             id,
             expires_at: Instant::now() + Duration::from_secs(15 * 60),
             svm,
+            executed_transactions: Mutex::new(Vec::new()),
+            simulated_transactions: Mutex::new(Vec::new()),
         }
     }
 }
@@ -60,7 +71,7 @@ impl ForkManager {
         let latest_blockhash = client.get_latest_blockhash()?;
         let slot = client.get_slot()?;
 
-        let mut svm = LiteSVM::new().with_sysvars();
+        let mut svm = LiteSVM::new().with_sysvars().with_blockhash_check(false);
 
         let mut hash = svm.get_sysvar::<SlotHashes>().clone();
         hash.push((slot, latest_blockhash));
@@ -70,6 +81,9 @@ impl ForkManager {
         clock.slot = slot;
         clock.unix_timestamp = chrono::Utc::now().timestamp();
         svm.set_sysvar(&clock);
+
+        let epoch_schedule: EpochSchedule = client.get_epoch_schedule()?;
+        svm.set_sysvar(&epoch_schedule);
 
         let fork_id = Uuid::new_v4();
         let fork = Fork::new(fork_id, Arc::new(Mutex::new(svm)));
@@ -111,10 +125,25 @@ impl ForkManager {
             let mut svm = fork.svm.lock().unwrap();
 
             self.preload_missing_accounts(&mut svm, &tx);
+            let mut txns = fork.executed_transactions.lock().unwrap();
 
             match svm.send_transaction(tx) {
-                Ok(res) => return Ok(res),
-                Err(e) => return Err(anyhow::Error::new(e.err)),
+                Ok(res) => {
+                    txns.push(TransactionRecord {
+                        txn: res.clone(),
+                        time: Local::now().to_string(),
+                        success: true,
+                    });
+                    return Ok(res);
+                }
+                Err(e) => {
+                    txns.push(TransactionRecord {
+                        txn: e.meta,
+                        time: Local::now().to_string(),
+                        success: false,
+                    });
+                    return Err(anyhow::Error::new(e.err));
+                }
             };
         } else {
             anyhow::bail!("Fork not found");
@@ -125,15 +154,33 @@ impl ForkManager {
         &self,
         fork_id: &Uuid,
         tx: VersionedTransaction,
-    ) -> Result<SimulatedTransactionInfo, FailedTransactionMetadata> {
+    ) -> anyhow::Result<SimulatedTransactionInfo> {
         if let Some(fork) = self.get_fork(fork_id) {
             let mut svm = fork.svm.lock().unwrap();
 
             self.preload_missing_accounts(&mut svm, &tx);
+            let mut txns = fork.simulated_transactions.lock().unwrap();
 
-            svm.simulate_transaction(tx)
+            match svm.simulate_transaction(tx) {
+                Ok(res) => {
+                    txns.push(TransactionRecord {
+                        txn: res.meta.clone(),
+                        time: Local::now().to_string(),
+                        success: false,
+                    });
+                    return Ok(res);
+                }
+                Err(e) => {
+                    txns.push(TransactionRecord {
+                        txn: e.meta,
+                        time: Local::now().to_string(),
+                        success: false,
+                    });
+                    return Err(anyhow::Error::new(e.err));
+                }
+            }
         } else {
-            Err(FailedTransactionMetadata::from(ProgramError::Custom(0)))
+            anyhow::bail!("Fork not found");
         }
     }
 
@@ -235,6 +282,58 @@ impl ForkManager {
             anyhow::bail!("Fork not found");
         }
     }
+
+    pub fn get_executed_transactions(
+        &self,
+        fork_id: &Uuid,
+    ) -> anyhow::Result<Vec<TransactionRecord>> {
+        match self
+            .forks
+            .get(fork_id)
+            .unwrap()
+            .executed_transactions
+            .lock()
+        {
+            Ok(txns) => Ok(txns.to_vec()),
+            Err(_) => anyhow::bail!("failed to get executed transactions"),
+        }
+    }
+
+    pub fn get_simulated_transactions(
+        &self,
+        fork_id: &Uuid,
+    ) -> anyhow::Result<Vec<TransactionRecord>> {
+        match self
+            .forks
+            .get(fork_id)
+            .unwrap()
+            .simulated_transactions
+            .lock()
+        {
+            Ok(txns) => Ok(txns.to_vec()),
+            Err(_) => anyhow::bail!("failed to get simulated transactions"),
+        }
+    }
+}
+
+// Assuming Write lock
+pub fn update_sysvars(svm: &mut MutexGuard<'_, LiteSVM>) -> anyhow::Result<()> {
+    let client = RpcClient::new(DEFAULT_RPC_CLIENT.to_string());
+    let latest_blockhash = client.get_latest_blockhash()?;
+    let slot = client.get_slot()?;
+
+    let mut slot_hashes = svm.get_sysvar::<SlotHashes>().clone();
+    if !slot_hashes.iter().any(|(_, h)| *h == latest_blockhash) {
+        slot_hashes.push((slot, latest_blockhash));
+        svm.set_sysvar(&SlotHashes::new(slot_hashes.as_ref()));
+    }
+
+    let mut clock = svm.get_sysvar::<Clock>();
+    clock.slot = slot;
+    clock.unix_timestamp = Utc::now().timestamp();
+    svm.set_sysvar(&clock);
+
+    Ok(())
 }
 
 #[cfg(test)]
