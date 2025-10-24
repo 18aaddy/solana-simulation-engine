@@ -148,6 +148,16 @@ cd solana-simulation-engine
 cargo run
 ```
 
+### Use the JavaScript scripts to test the Simulation Engine:
+```bash
+cd tests
+npm install
+# Test the API endpoints
+node api_test.js
+# Test transactions on the engine
+node test_simulation_engine.js
+```
+
 ### Default RPC:
 
 ```
