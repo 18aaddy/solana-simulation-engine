@@ -222,9 +222,10 @@ async function runTests() {
   }
 }
 
-runTests().catch(console.error);
+if (require.main === module) {
+  runTests().catch(console.error);
+}
 
-// Export functions for use in other test files
 module.exports = {
   BASE_URL,
   makeRequest,
